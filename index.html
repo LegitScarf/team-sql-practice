@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SQL Practice Lab - Oracle Style Feed</title>
+  <title>SQL Practice Lab - Oracle Edition</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Multi-threading SIMD support -->
   <script src="https://cdn.jsdelivr.net/npm/coi-serviceworker/coi-serviceworker.min.js"></script>
@@ -28,8 +28,9 @@
     }
 
     function saveQueryToStorage(sql) {
-      if (!sql || sql.trim().toUpperCase() === 'CLSCR' || sql.trim().toUpperCase() === 'CLEAR SCREEN') return;
-      // Avoid duplicate consecutive entries
+      if (!sql) return;
+      const clean = sql.trim().toUpperCase().replace(/;/g, '');
+      if (clean === 'CLSCR' || clean === 'CLEAR SCREEN' || clean === 'CLEAR') return;
       if (queryHistory.length > 0 && queryHistory[queryHistory.length - 1] === sql) return;
       
       queryHistory.push(sql);
@@ -56,7 +57,7 @@
         await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
         conn = await db.connect();
 
-        status.innerHTML = `<span class="text-emerald-400">● Engine Ready (Oracle Stream Active)</span>`;
+        status.innerHTML = `<span class="text-emerald-400">● Oracle Engine Active</span>`;
         
         await loadSampleData();
         await refreshSchema();
@@ -65,8 +66,14 @@
       }
     }
 
+    // Oracle System Tables & Sample Dataset
     async function loadSampleData() {
       await conn.query(`
+        -- Oracle's classic DUAL table
+        CREATE TABLE IF NOT EXISTS dual (dummy VARCHAR);
+        INSERT INTO dual VALUES ('X');
+
+        -- Sample practice dataset
         CREATE TABLE IF NOT EXISTS "employees" (
           "Employee ID" INT, 
           "First Name" VARCHAR, 
@@ -84,6 +91,7 @@
       `);
     }
 
+    // Refresh Sidebar Tables and Column Lists
     async function refreshSchema() {
       const schemaList = document.getElementById('schema-list');
       schemaList.innerHTML = '';
@@ -102,7 +110,7 @@
           <div class="font-bold text-amber-400 cursor-pointer hover:underline flex justify-between items-center" 
                onclick="window.insertText('${formattedTbl}')" title="Click to insert table name">
             <span>📋 ${tbl}</span>
-            <span class="text-[10px] text-slate-500">${colList.length} cols</span>
+            <span class="text-[10px] text-slate-500">${colList.length} col${colList.length > 1 ? 's' : ''}</span>
           </div>
           <div class="text-slate-400 text-[11px] mt-1 space-y-0.5">
             ${colList.map(c => {
@@ -176,14 +184,13 @@
 
       const cleanCommand = sql.replace(/;/g, '').trim().toUpperCase();
 
-      // Intercept Oracle CLSCR / CLEAR SCREEN commands
+      // Check for Oracle CLSCR / CLEAR SCREEN
       if (cleanCommand === 'CLSCR' || cleanCommand === 'CLEAR SCREEN' || cleanCommand === 'CLEAR') {
         window.clearScreen();
         ed.value = '';
         return;
       }
 
-      // Persist query to LocalStorage
       saveQueryToStorage(sql);
 
       executionCounter++;
@@ -191,37 +198,31 @@
       const feed = document.getElementById('stream-feed');
       const timeStr = new Date().toLocaleTimeString();
 
-      // Create new Execution Card in Stream Feed
       const card = document.createElement('div');
       card.className = "mb-4 bg-slate-900/90 border border-slate-800 rounded-lg shadow-md overflow-hidden transition duration-150";
       card.id = `exec-card-${currentExecId}`;
 
-      // Card Header
       card.innerHTML = `
         <div class="bg-slate-800/90 px-3.5 py-2 border-b border-slate-700/80 flex justify-between items-center text-xs">
           <div class="flex items-center space-x-2">
-            <span class="bg-indigo-600/30 text-indigo-400 border border-indigo-500/40 px-1.5 py-0.5 rounded font-mono font-bold">SQL #${currentExecId}</span>
+            <span class="bg-red-700/30 text-red-400 border border-red-500/40 px-1.5 py-0.5 rounded font-mono font-bold">SQL #${currentExecId}</span>
             <span class="text-slate-400 font-mono text-[11px]">${timeStr}</span>
           </div>
           <div class="flex items-center space-x-2">
             <span id="metric-${currentExecId}" class="text-amber-400 font-mono text-[11px]">Running...</span>
-            <button onclick="window.loadToEditor('${encodeURIComponent(sql)}')" class="px-2 py-0.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded text-[11px]" title="Edit again">Edit</button>
+            <button onclick="window.loadToEditor('${encodeURIComponent(sql)}')" class="px-2 py-0.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded text-[11px]">Edit</button>
             <button onclick="window.copySql('${encodeURIComponent(sql)}')" class="px-2 py-0.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded text-[11px]">Copy</button>
           </div>
         </div>
-        <!-- Query Text Area -->
         <div class="px-3.5 py-2 bg-slate-950 border-b border-slate-800 font-mono text-xs text-indigo-300 whitespace-pre-wrap select-text leading-relaxed">${escapeHtml(sql)}</div>
-        <!-- Result or Error Body -->
         <div id="body-${currentExecId}" class="p-3 text-xs overflow-x-auto select-text">
           <span class="text-slate-500 italic">Executing statement...</span>
         </div>
       `;
 
       feed.appendChild(card);
-      // Auto-scroll to latest card
       card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-      // Execute SQL via DuckDB
       const t0 = performance.now();
       try {
         const result = await conn.query(sql);
@@ -238,7 +239,6 @@
           return;
         }
 
-        // Render preview table (up to 50 rows)
         const renderLimit = Math.min(totalRows, 50);
         const fields = result.schema.fields.map(f => f.name);
 
@@ -300,17 +300,15 @@
       return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
 
-    // --- SQL*PLUS COMMAND HISTORY (UP / DOWN ARROW CYCLING) ---
+    // --- ARROW KEY HISTORY (UP / DOWN) ---
     const editor = document.getElementById('sql-editor');
     editor.addEventListener('keydown', (e) => {
-      // Run on Ctrl+Enter or Cmd+Enter
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
         window.runQuery();
         return;
       }
 
-      // Navigate history with ArrowUp when at top of editor
       if (e.key === 'ArrowUp' && (editor.selectionStart === 0 || editor.value === '')) {
         if (queryHistory.length > 0 && historyIndex > 0) {
           historyIndex--;
@@ -319,7 +317,6 @@
         }
       }
 
-      // Navigate forward with ArrowDown
       if (e.key === 'ArrowDown' && historyIndex < queryHistory.length - 1) {
         historyIndex++;
         editor.value = queryHistory[historyIndex];
@@ -330,7 +327,7 @@
       }
     });
 
-    // --- DYNAMIC SPLITTER RESIZING LOGIC ---
+    // --- DYNAMIC SPLITTER RESIZING ---
     const resizer = document.getElementById('drag-resizer');
     const editorContainer = document.getElementById('editor-container');
     let isDragging = false;
@@ -373,7 +370,7 @@
     <div class="flex items-center space-x-3">
       <span class="bg-red-700 px-2 py-0.5 rounded text-white font-mono font-bold text-xs tracking-wider">ORACLE / SQL</span>
       <h1 class="text-sm font-semibold">Continuous Practice Stream</h1>
-      <span class="text-[11px] text-slate-400 bg-slate-800 px-2 py-0.5 rounded-full">Stream Buffer Active</span>
+      <span class="text-[11px] text-slate-400 bg-slate-800 px-2 py-0.5 rounded-full">DUAL Table Available</span>
     </div>
     <div id="engine-status" class="text-xs text-amber-400 font-mono">Initializing...</div>
   </header>
@@ -403,7 +400,7 @@
         <div class="flex justify-between items-center mb-1.5 select-none">
           <div class="flex items-center space-x-3">
             <span class="text-xs font-semibold text-slate-400 uppercase tracking-wide">
-              SQL Prompt <span class="text-slate-600 font-normal">(Ctrl+Enter to run • ↑/↓ for history)</span>
+              SQL Prompt <span class="text-slate-600 font-normal">(Ctrl+Enter • ↑/↓ history)</span>
             </span>
             <!-- Quick Size Presets -->
             <div class="flex items-center space-x-1 text-[11px]">
@@ -425,7 +422,8 @@
           </div>
         </div>
 
-        <textarea id="sql-editor" class="flex-1 w-full bg-slate-900 border border-slate-800 rounded p-2.5 font-mono text-xs text-emerald-300 focus:outline-none focus:border-indigo-500 resize-none leading-relaxed" placeholder="Type a SQL query or 'CLSCR' to clear screen...">SELECT "First Name", "Annual Salary" FROM employees WHERE "Annual Salary" >= 75000;</textarea>
+        <textarea id="sql-editor" class="flex-1 w-full bg-slate-900 border border-slate-800 rounded p-2.5 font-mono text-xs text-emerald-300 focus:outline-none focus:border-indigo-500 resize-none leading-relaxed" placeholder="Type a SQL query or 'CLSCR' to clear screen...">-- Classic Oracle queries with DUAL:
+SELECT UPPER('oracle sql practice') AS title, 25 * 4 AS math_result, CURRENT_DATE FROM dual;</textarea>
       </div>
 
       <!-- Draggable Splitter Divider -->
