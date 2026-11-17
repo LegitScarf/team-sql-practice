@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SQL Practice Lab & Compiler</title>
+  <title>SQL Practice Lab - Oracle Style Feed</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Enables SharedArrayBuffer for multi-threaded SIMD on any static host -->
+  <!-- Multi-threading SIMD support -->
   <script src="https://cdn.jsdelivr.net/npm/coi-serviceworker/coi-serviceworker.min.js"></script>
 
   <script type="module">
@@ -13,14 +13,38 @@
 
     let db = null;
     let conn = null;
-    let currentResults = null;
-    let currentPage = 1;
-    const PAGE_SIZE = 50; // Max rows rendered to the DOM per page for instant performance
+    let queryHistory = [];
+    let historyIndex = -1;
+    let executionCounter = 0;
 
-    // --- INITIALIZE DUCKDB-WASM ENGINE ---
+    // --- LOCAL STORAGE MANAGER ---
+    function loadHistoryFromStorage() {
+      try {
+        const saved = localStorage.getItem('oracle_sql_history');
+        if (saved) queryHistory = JSON.parse(saved);
+      } catch (e) {
+        queryHistory = [];
+      }
+    }
+
+    function saveQueryToStorage(sql) {
+      if (!sql || sql.trim().toUpperCase() === 'CLSCR' || sql.trim().toUpperCase() === 'CLEAR SCREEN') return;
+      // Avoid duplicate consecutive entries
+      if (queryHistory.length > 0 && queryHistory[queryHistory.length - 1] === sql) return;
+      
+      queryHistory.push(sql);
+      if (queryHistory.length > 150) queryHistory.shift(); // Keep last 150 queries
+      localStorage.setItem('oracle_sql_history', JSON.stringify(queryHistory));
+      historyIndex = queryHistory.length;
+    }
+
+    // --- INITIALIZE DUCKDB ENGINE ---
     async function init() {
       const status = document.getElementById('engine-status');
-      status.innerText = "Spawning DuckDB Wasm Engine...";
+      status.innerText = "Spawning DuckDB Engine...";
+
+      loadHistoryFromStorage();
+      historyIndex = queryHistory.length;
 
       try {
         const JSDELIVR_BUNDLES = duckdb.getJsDelivrBundles();
@@ -32,7 +56,7 @@
         await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
         conn = await db.connect();
 
-        status.innerHTML = `<span class="text-emerald-400">● Engine Ready (${bundle.pthreadWorker ? 'Multi-threaded SIMD' : 'Standard'})</span>`;
+        status.innerHTML = `<span class="text-emerald-400">● Engine Ready (Oracle Stream Active)</span>`;
         
         await loadSampleData();
         await refreshSchema();
@@ -41,7 +65,6 @@
       }
     }
 
-    // Default starter dataset
     async function loadSampleData() {
       await conn.query(`
         CREATE TABLE IF NOT EXISTS "employees" (
@@ -61,7 +84,6 @@
       `);
     }
 
-    // Refresh Sidebar Tables and Column Lists
     async function refreshSchema() {
       const schemaList = document.getElementById('schema-list');
       schemaList.innerHTML = '';
@@ -74,8 +96,6 @@
 
         const card = document.createElement('div');
         card.className = "p-2 bg-slate-800/80 rounded border border-slate-700 text-xs";
-        
-        // Escape table name if it contains spaces
         const formattedTbl = tbl.includes(' ') ? `"${tbl}"` : tbl;
 
         card.innerHTML = `
@@ -86,7 +106,6 @@
           </div>
           <div class="text-slate-400 text-[11px] mt-1 space-y-0.5">
             ${colList.map(c => {
-              // Automatically wrap column names that have spaces in double quotes
               const colIdent = c.column_name.includes(' ') ? `"${c.column_name}"` : c.column_name;
               return `
                 <div class="flex justify-between font-mono hover:text-slate-200 cursor-pointer py-0.5" 
@@ -112,7 +131,7 @@
       ed.selectionStart = ed.selectionEnd = start + t.length;
     };
 
-    // --- ZERO-COPY HIGH-SPEED FILE REGISTRATION ---
+    // --- ZERO-COPY FILE REGISTRATION ---
     document.getElementById('file-input').addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
@@ -124,8 +143,6 @@
 
       try {
         await db.registerFileHandle(file.name, file, duckdb.DuckDBDataProtocol.BROWSER_FILEREADER, true);
-
-        // CREATE VIEW allows zero-copy virtual querying without duplicating data in memory
         if (file.name.endsWith('.csv')) {
           await conn.query(`CREATE OR REPLACE VIEW "${tblName}" AS SELECT * FROM read_csv_auto('${file.name}', parallel=true);`);
         } else if (file.name.endsWith('.parquet')) {
@@ -133,52 +150,130 @@
         } else if (file.name.endsWith('.json')) {
           await conn.query(`CREATE OR REPLACE VIEW "${tblName}" AS SELECT * FROM read_json_auto('${file.name}');`);
         }
-
         const elapsed = (performance.now() - start).toFixed(0);
-        status.innerHTML = `<span class="text-emerald-400">✓ <b>${tblName}</b> ready in ${elapsed}ms</span>`;
+        status.innerHTML = `<span class="text-emerald-400">✓ View <b>${tblName}</b> ready in ${elapsed}ms</span>`;
         await refreshSchema();
       } catch (err) {
         status.innerHTML = `<span class="text-rose-400">Upload Error: ${err.message}</span>`;
       }
     });
 
-    // --- QUERY EXECUTION & PAGINATION ---
-    window.runQuery = async () => {
-      const sql = document.getElementById('sql-editor').value.trim();
-      const resultsArea = document.getElementById('results-area');
-      const errorBox = document.getElementById('error-box');
-      const meta = document.getElementById('query-meta');
-      const pagination = document.getElementById('pagination-bar');
+    // --- ORACLE CLSCR (CLEAR SCREEN) HANDLER ---
+    window.clearScreen = () => {
+      const feed = document.getElementById('stream-feed');
+      feed.innerHTML = `
+        <div class="text-slate-500 text-xs italic py-2 border-b border-slate-800">
+          Screen cleared (CLSCR). Ready for new statements.
+        </div>
+      `;
+    };
 
-      errorBox.classList.add('hidden');
+    // --- CONTINUOUS STREAM QUERY EXECUTION ---
+    window.runQuery = async () => {
+      const ed = document.getElementById('sql-editor');
+      const sql = ed.value.trim();
       if (!sql) return;
 
+      const cleanCommand = sql.replace(/;/g, '').trim().toUpperCase();
+
+      // Intercept Oracle CLSCR / CLEAR SCREEN commands
+      if (cleanCommand === 'CLSCR' || cleanCommand === 'CLEAR SCREEN' || cleanCommand === 'CLEAR') {
+        window.clearScreen();
+        ed.value = '';
+        return;
+      }
+
+      // Persist query to LocalStorage
+      saveQueryToStorage(sql);
+
+      executionCounter++;
+      const currentExecId = executionCounter;
+      const feed = document.getElementById('stream-feed');
+      const timeStr = new Date().toLocaleTimeString();
+
+      // Create new Execution Card in Stream Feed
+      const card = document.createElement('div');
+      card.className = "mb-4 bg-slate-900/90 border border-slate-800 rounded-lg shadow-md overflow-hidden transition duration-150";
+      card.id = `exec-card-${currentExecId}`;
+
+      // Card Header
+      card.innerHTML = `
+        <div class="bg-slate-800/90 px-3.5 py-2 border-b border-slate-700/80 flex justify-between items-center text-xs">
+          <div class="flex items-center space-x-2">
+            <span class="bg-indigo-600/30 text-indigo-400 border border-indigo-500/40 px-1.5 py-0.5 rounded font-mono font-bold">SQL #${currentExecId}</span>
+            <span class="text-slate-400 font-mono text-[11px]">${timeStr}</span>
+          </div>
+          <div class="flex items-center space-x-2">
+            <span id="metric-${currentExecId}" class="text-amber-400 font-mono text-[11px]">Running...</span>
+            <button onclick="window.loadToEditor('${encodeURIComponent(sql)}')" class="px-2 py-0.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded text-[11px]" title="Edit again">Edit</button>
+            <button onclick="window.copySql('${encodeURIComponent(sql)}')" class="px-2 py-0.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded text-[11px]">Copy</button>
+          </div>
+        </div>
+        <!-- Query Text Area -->
+        <div class="px-3.5 py-2 bg-slate-950 border-b border-slate-800 font-mono text-xs text-indigo-300 whitespace-pre-wrap select-text leading-relaxed">${escapeHtml(sql)}</div>
+        <!-- Result or Error Body -->
+        <div id="body-${currentExecId}" class="p-3 text-xs overflow-x-auto select-text">
+          <span class="text-slate-500 italic">Executing statement...</span>
+        </div>
+      `;
+
+      feed.appendChild(card);
+      // Auto-scroll to latest card
+      card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+      // Execute SQL via DuckDB
       const t0 = performance.now();
-      meta.innerText = "Executing...";
-
       try {
-        currentResults = await conn.query(sql);
+        const result = await conn.query(sql);
         const duration = (performance.now() - t0).toFixed(1);
-        const totalRows = currentResults.numRows;
+        const totalRows = result.numRows;
 
-        meta.innerHTML = `<span class="text-emerald-400">${totalRows.toLocaleString()} rows</span> in <span class="text-amber-300">${duration} ms</span>`;
+        document.getElementById(`metric-${currentExecId}`).innerHTML = 
+          `<span class="text-emerald-400">${totalRows.toLocaleString()} rows</span> (${duration} ms)`;
+
+        const cardBody = document.getElementById(`body-${currentExecId}`);
 
         if (totalRows === 0) {
-          resultsArea.innerHTML = `<div class="text-slate-500 p-4">Query executed successfully (0 rows returned).</div>`;
-          pagination.classList.add('hidden');
+          cardBody.innerHTML = `<span class="text-emerald-400">✓ Statement executed successfully (0 rows affected / returned).</span>`;
           return;
         }
 
-        currentPage = 1;
-        renderPage();
-        pagination.classList.remove('hidden');
-      } catch (err) {
-        meta.innerText = '';
-        resultsArea.innerHTML = '';
-        pagination.classList.add('hidden');
-        errorBox.classList.remove('hidden');
+        // Render preview table (up to 50 rows)
+        const renderLimit = Math.min(totalRows, 50);
+        const fields = result.schema.fields.map(f => f.name);
 
-        // Check for common space in column name issue and offer a helpful tip
+        let tableHtml = `
+          <div class="overflow-x-auto max-h-96">
+            <table class="min-w-full text-left text-xs font-mono divide-y divide-slate-800">
+              <thead class="bg-slate-900 sticky top-0 text-slate-300">
+                <tr>
+                  <th class="px-3 py-1.5 text-slate-600 bg-slate-900">#</th>
+                  ${fields.map(f => `<th class="px-3 py-1.5 font-semibold border-b border-slate-700 bg-slate-900">${f}</th>`).join('')}
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-900 bg-slate-950 text-slate-300">
+        `;
+
+        for (let r = 0; r < renderLimit; r++) {
+          tableHtml += `<tr class="hover:bg-slate-900">`;
+          tableHtml += `<td class="px-3 py-1 text-slate-600 select-none">${r + 1}</td>`;
+          for (const col of result.schema.fields) {
+            const val = result.getChild(col.name).get(r);
+            tableHtml += `<td class="px-3 py-1 whitespace-nowrap">${val === null ? '<span class="text-slate-600">NULL</span>' : val}</td>`;
+          }
+          tableHtml += `</tr>`;
+        }
+
+        tableHtml += `</tbody></table></div>`;
+        if (totalRows > 50) {
+          tableHtml += `<div class="text-[11px] text-slate-500 mt-2 italic">Showing first 50 of ${totalRows.toLocaleString()} rows.</div>`;
+        }
+
+        cardBody.innerHTML = tableHtml;
+      } catch (err) {
+        document.getElementById(`metric-${currentExecId}`).innerHTML = `<span class="text-rose-400 font-bold">FAILED</span>`;
+        const cardBody = document.getElementById(`body-${currentExecId}`);
+
         let hint = '';
         if (err.message.includes('not found') || err.message.includes('syntax error')) {
           hint = `<div class="mt-2 text-amber-300 font-sans text-xs bg-amber-950/40 p-2 rounded border border-amber-800">
@@ -187,65 +282,55 @@
           </div>`;
         }
 
-        errorBox.innerHTML = `<strong>SQL Error:</strong><br>${err.message}${hint}`;
+        cardBody.innerHTML = `<div class="text-rose-400 font-mono"><strong>ORA/SQL Error:</strong><br>${escapeHtml(err.message)}</div>${hint}`;
       }
     };
 
-    function renderPage() {
-      const resultsArea = document.getElementById('results-area');
-      const pageInfo = document.getElementById('page-info');
-      const totalRows = currentResults.numRows;
-      const totalPages = Math.ceil(totalRows / PAGE_SIZE) || 1;
+    window.loadToEditor = (encodedSql) => {
+      const ed = document.getElementById('sql-editor');
+      ed.value = decodeURIComponent(encodedSql);
+      ed.focus();
+    };
 
-      pageInfo.innerText = `Page ${currentPage} of ${totalPages.toLocaleString()}`;
+    window.copySql = (encodedSql) => {
+      navigator.clipboard.writeText(decodeURIComponent(encodedSql));
+    };
 
-      const startIdx = (currentPage - 1) * PAGE_SIZE;
-      const endIdx = Math.min(startIdx + PAGE_SIZE, totalRows);
-      const fields = currentResults.schema.fields.map(f => f.name);
-
-      let tableHtml = `
-        <div class="overflow-x-auto">
-          <table class="min-w-full text-left text-xs font-mono divide-y divide-slate-800">
-            <thead class="bg-slate-900 sticky top-0 text-slate-300 z-10">
-              <tr>
-                <th class="px-3 py-2 text-slate-600 bg-slate-900">#</th>
-                ${fields.map(f => `<th class="px-3 py-2 font-semibold border-b border-slate-700 bg-slate-900">${f}</th>`).join('')}
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-900 bg-slate-950 text-slate-300">
-      `;
-
-      // Read directly from Arrow columnar vectors slice-by-slice
-      for (let r = startIdx; r < endIdx; r++) {
-        tableHtml += `<tr class="hover:bg-slate-900">`;
-        tableHtml += `<td class="px-3 py-1 text-slate-600 select-none">${r + 1}</td>`;
-        for (const col of currentResults.schema.fields) {
-          const val = currentResults.getChild(col.name).get(r);
-          tableHtml += `<td class="px-3 py-1 whitespace-nowrap">${val === null ? '<span class="text-slate-600">NULL</span>' : val}</td>`;
-        }
-        tableHtml += `</tr>`;
-      }
-
-      tableHtml += `</tbody></table></div>`;
-      resultsArea.innerHTML = tableHtml;
+    function escapeHtml(str) {
+      return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
 
-    window.nextPage = () => {
-      const totalPages = Math.ceil(currentResults.numRows / PAGE_SIZE);
-      if (currentPage < totalPages) {
-        currentPage++;
-        renderPage();
+    // --- SQL*PLUS COMMAND HISTORY (UP / DOWN ARROW CYCLING) ---
+    const editor = document.getElementById('sql-editor');
+    editor.addEventListener('keydown', (e) => {
+      // Run on Ctrl+Enter or Cmd+Enter
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        window.runQuery();
+        return;
       }
-    };
 
-    window.prevPage = () => {
-      if (currentPage > 1) {
-        currentPage--;
-        renderPage();
+      // Navigate history with ArrowUp when at top of editor
+      if (e.key === 'ArrowUp' && (editor.selectionStart === 0 || editor.value === '')) {
+        if (queryHistory.length > 0 && historyIndex > 0) {
+          historyIndex--;
+          editor.value = queryHistory[historyIndex];
+          e.preventDefault();
+        }
       }
-    };
 
-    // --- DYNAMIC SPLITTER RESIZE LOGIC ---
+      // Navigate forward with ArrowDown
+      if (e.key === 'ArrowDown' && historyIndex < queryHistory.length - 1) {
+        historyIndex++;
+        editor.value = queryHistory[historyIndex];
+        e.preventDefault();
+      } else if (e.key === 'ArrowDown' && historyIndex === queryHistory.length - 1) {
+        historyIndex = queryHistory.length;
+        editor.value = '';
+      }
+    });
+
+    // --- DYNAMIC SPLITTER RESIZING LOGIC ---
     const resizer = document.getElementById('drag-resizer');
     const editorContainer = document.getElementById('editor-container');
     let isDragging = false;
@@ -261,7 +346,7 @@
       const rect = editorContainer.getBoundingClientRect();
       const newHeight = e.clientY - rect.top;
 
-      if (newHeight >= 120 && newHeight <= window.innerHeight * 0.8) {
+      if (newHeight >= 110 && newHeight <= window.innerHeight * 0.75) {
         editorContainer.style.height = `${newHeight}px`;
       }
     });
@@ -278,13 +363,6 @@
       editorContainer.style.height = `${px}px`;
     };
 
-    // Keyboard shortcut (Ctrl + Enter) to run
-    document.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-        window.runQuery();
-      }
-    });
-
     init();
   </script>
 </head>
@@ -293,8 +371,9 @@
   <!-- Header -->
   <header class="bg-slate-900 border-b border-slate-800 px-6 py-2.5 flex justify-between items-center">
     <div class="flex items-center space-x-3">
-      <span class="bg-indigo-600 px-2 py-0.5 rounded text-white font-black text-sm">SQL Turbo</span>
-      <h1 class="text-sm font-semibold">In-Browser Practice Lab</h1>
+      <span class="bg-red-700 px-2 py-0.5 rounded text-white font-mono font-bold text-xs tracking-wider">ORACLE / SQL</span>
+      <h1 class="text-sm font-semibold">Continuous Practice Stream</h1>
+      <span class="text-[11px] text-slate-400 bg-slate-800 px-2 py-0.5 rounded-full">Stream Buffer Active</span>
     </div>
     <div id="engine-status" class="text-xs text-amber-400 font-mono">Initializing...</div>
   </header>
@@ -302,7 +381,7 @@
   <!-- Body -->
   <div class="flex flex-1 overflow-hidden select-text">
     
-    <!-- Left Sidebar -->
+    <!-- Left Sidebar: Schema -->
     <aside class="w-64 bg-slate-900/60 border-r border-slate-800 p-3 flex flex-col justify-between select-none">
       <div class="overflow-y-auto pr-1">
         <h2 class="text-xs font-semibold uppercase text-slate-400 tracking-wider mb-2">Tables & Schema</h2>
@@ -312,7 +391,7 @@
       <div class="border-t border-slate-800 pt-3">
         <label class="block text-xs font-semibold uppercase text-slate-400 mb-1">Load Dataset</label>
         <input type="file" id="file-input" accept=".csv,.parquet,.json" class="block w-full text-xs text-slate-400 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-indigo-600 file:text-white cursor-pointer"/>
-        <div id="upload-status" class="text-[11px] text-slate-500 mt-1">Accepts CSV, Parquet, JSON</div>
+        <div id="upload-status" class="text-[11px] text-slate-500 mt-1">Direct memory streaming</div>
       </div>
     </aside>
 
@@ -320,28 +399,33 @@
     <main class="flex-1 flex flex-col overflow-hidden bg-slate-950">
       
       <!-- Resizable SQL Editor Container -->
-      <div id="editor-container" class="flex flex-col bg-slate-950 p-3 min-h-[120px]" style="height: 220px;">
+      <div id="editor-container" class="flex flex-col bg-slate-950 p-3 min-h-[110px]" style="height: 200px;">
         <div class="flex justify-between items-center mb-1.5 select-none">
           <div class="flex items-center space-x-3">
             <span class="text-xs font-semibold text-slate-400 uppercase tracking-wide">
-              SQL Editor <span class="text-slate-600 font-normal">(Ctrl + Enter)</span>
+              SQL Prompt <span class="text-slate-600 font-normal">(Ctrl+Enter to run • ↑/↓ for history)</span>
             </span>
-            <!-- Quick Preset Resize Buttons -->
+            <!-- Quick Size Presets -->
             <div class="flex items-center space-x-1 text-[11px]">
-              <button onclick="setEditorHeight(140)" class="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400">Compact</button>
-              <button onclick="setEditorHeight(320)" class="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400">50/50</button>
-              <button onclick="setEditorHeight(550)" class="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400">Large</button>
+              <button onclick="setEditorHeight(130)" class="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400">Compact</button>
+              <button onclick="setEditorHeight(280)" class="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400">50/50</button>
+              <button onclick="setEditorHeight(480)" class="px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400">Large</button>
             </div>
           </div>
-          <button onclick="runQuery()" class="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs px-4 py-1.5 rounded transition shadow">
-            ▶ Execute
-          </button>
+          
+          <div class="flex items-center space-x-2">
+            <!-- Clear Screen Button -->
+            <button onclick="clearScreen()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs px-3 py-1.5 rounded transition border border-slate-700" title="Type CLSCR or click to clear feed">
+              🧹 CLSCR
+            </button>
+            <!-- Execute Button -->
+            <button onclick="runQuery()" class="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs px-4 py-1.5 rounded transition shadow">
+              ▶ Execute
+            </button>
+          </div>
         </div>
 
-        <textarea id="sql-editor" class="flex-1 w-full bg-slate-900 border border-slate-800 rounded p-2.5 font-mono text-xs text-emerald-300 focus:outline-none focus:border-indigo-500 resize-none leading-relaxed" placeholder="SELECT &quot;First Name&quot;, &quot;Annual Salary&quot; FROM employees WHERE &quot;Annual Salary&quot; > 70000;">SELECT "First Name", "Last Name", "Department", "Annual Salary"
-FROM employees 
-WHERE "Annual Salary" >= 75000 
-ORDER BY "Annual Salary" DESC;</textarea>
+        <textarea id="sql-editor" class="flex-1 w-full bg-slate-900 border border-slate-800 rounded p-2.5 font-mono text-xs text-emerald-300 focus:outline-none focus:border-indigo-500 resize-none leading-relaxed" placeholder="Type a SQL query or 'CLSCR' to clear screen...">SELECT "First Name", "Annual Salary" FROM employees WHERE "Annual Salary" >= 75000;</textarea>
       </div>
 
       <!-- Draggable Splitter Divider -->
@@ -349,21 +433,19 @@ ORDER BY "Annual Salary" DESC;</textarea>
         <div class="w-8 h-1 rounded-full bg-slate-700 group-hover:bg-white transition-colors"></div>
       </div>
 
-      <!-- Error Box -->
-      <div id="error-box" class="hidden m-3 p-3 bg-rose-950/80 border border-rose-800 rounded text-rose-300 font-mono text-xs overflow-auto"></div>
-
-      <!-- Results View -->
-      <div class="flex-1 flex flex-col overflow-hidden">
-        <div class="bg-slate-900/40 px-4 py-1.5 border-b border-slate-800 flex justify-between items-center text-xs">
-          <div id="query-meta" class="font-mono text-slate-400">Ready</div>
-          <!-- Pagination -->
-          <div id="pagination-bar" class="hidden flex items-center space-x-2">
-            <button onclick="prevPage()" class="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 text-xs">◀ Prev</button>
-            <span id="page-info" class="text-slate-400 font-mono text-[11px]"></span>
-            <button onclick="nextPage()" class="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 text-xs">Next ▶</button>
+      <!-- Continuous Streaming Feed Container -->
+      <div class="flex-1 flex flex-col overflow-hidden bg-slate-950">
+        <div class="bg-slate-900/50 px-4 py-1.5 border-b border-slate-800 flex justify-between items-center text-xs select-none">
+          <span class="font-semibold text-slate-400 uppercase tracking-wider">Console Feed (Session Stream)</span>
+          <span class="text-[11px] text-slate-500 font-mono">Type <code>CLSCR</code> to clear</span>
+        </div>
+        
+        <!-- Stream Feed Area -->
+        <div id="stream-feed" class="flex-1 overflow-y-auto p-4 space-y-3">
+          <div class="text-slate-500 text-xs italic py-1">
+            Oracle-style session active. Execute queries above; each run will be recorded below.
           </div>
         </div>
-        <div id="results-area" class="flex-1 overflow-auto"></div>
       </div>
 
     </main>
